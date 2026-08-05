@@ -10097,6 +10097,21 @@ declare namespace Protocol {
        * Frame swap timestamp.
        */
       timestamp?: Network.TimeSinceEpoch;
+      /**
+       * Video codec of the frame payload. Present only for video streams
+       * (e.g. "h264"); absent for image frames.
+       */
+      codec?: string;
+      /**
+       * WebCodecs-compatible codec string for initializing a decoder, e.g.
+       * "avc1.42E01E". Present only for video streams.
+       */
+      codecString?: string;
+      /**
+       * Whether the current frame is a key frame. The frontend uses key
+       * frames to initialize the decoder.
+       */
+      keyFrame?: boolean;
     }
 
     /**
@@ -11080,6 +11095,7 @@ declare namespace Protocol {
     export const enum StartScreencastRequestFormat {
       Jpeg = 'jpeg',
       Png = 'png',
+      H264 = 'h264',
     }
 
     export interface StartScreencastRequest {

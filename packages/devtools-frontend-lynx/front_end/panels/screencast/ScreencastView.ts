@@ -39,6 +39,34 @@ import * as Host from '../../core/host/host.js';
 import * as i18n from '../../core/i18n/i18n.js';
 import * as SDK from '../../core/sdk/sdk.js';
 import * as Protocol from '../../generated/protocol.js';
+
+// Minimal typings for the WebCodecs API. The TypeScript lib version used by
+// this project predates WebCodecs, so declare only what screencast uses.
+interface EncodedVideoChunkInit {
+  type: 'key'|'delta';
+  timestamp: number;
+  data: Uint8Array;
+}
+declare const EncodedVideoChunk: new (init: EncodedVideoChunkInit) => unknown;
+interface VideoFrameLike {
+  displayWidth: number;
+  displayHeight: number;
+  close(): void;
+}
+interface VideoDecoderConfig {
+  codec: string;
+  optimizeForLatency?: boolean;
+}
+interface VideoDecoderLike {
+  readonly state: string;
+  configure(config: VideoDecoderConfig): void;
+  decode(chunk: unknown): void;
+  close(): void;
+}
+declare const VideoDecoder: new (init: {
+  output: (frame: VideoFrameLike) => void;
+  error: (error: Error) => void;
+}) => VideoDecoderLike;
 import * as UI from '../../ui/legacy/legacy.js';
 import { postPluginMessage } from '../../core/protocol_client/InspectorBackend.js';
 
@@ -113,6 +141,10 @@ export class ScreencastView extends UI.Widget.VBox implements SDK.OverlayModel.H
   _navigationForward!: HTMLButtonElement;
   _canvasContainerElement?: HTMLElement;
   _isCasting?: boolean;
+  _h264Decoder?: VideoDecoderLike;
+  _h264CodecString?: string;
+  _h264Casting?: boolean;
+  _viewportInitializedForH264?: boolean;
   _checkerboardPattern?: CanvasPattern | null;
   _targetInactive?: boolean;
   _deferredCasting?: number;
@@ -225,7 +257,11 @@ export class ScreencastView extends UI.Widget.VBox implements SDK.OverlayModel.H
     dimensions.height *= window.devicePixelRatio;
     const qualityValue = (!localStorage.getItem('isHD') || localStorage.getItem('isHD') === 'false') ? 20 : 100;
     // Note: startScreencast width and height are expected to be integers so must be floored.
-    let format = Protocol.Page.StartScreencastRequestFormat.Jpeg;
+    // Use the H.264 video stream when the runtime supports WebCodecs decoding;
+    // fall back to JPEG screenshots otherwise.
+    this._h264Casting = typeof VideoDecoder !== 'undefined';
+    let format = this._h264Casting ? Protocol.Page.StartScreencastRequestFormat.H264 :
+                                     Protocol.Page.StartScreencastRequestFormat.Jpeg;
     let maxWidth = Math.floor(Math.min(maxImageDimension, dimensions.width));
     let maxHeight = Math.floor(dimensions.height);
     this._screenCaptureModel.startScreencast(
@@ -250,6 +286,7 @@ export class ScreencastView extends UI.Widget.VBox implements SDK.OverlayModel.H
       return;
     }
     this._isCasting = false;
+    this._destroyH264Decoder();
     this._screenCaptureModel.stopScreencast();
     for (const emulationModel of SDK.TargetManager.TargetManager.instance().models(SDK.EmulationModel.EmulationModel)) {
       emulationModel.overrideEmulateTouch(false);
@@ -260,6 +297,10 @@ export class ScreencastView extends UI.Widget.VBox implements SDK.OverlayModel.H
   }
 
   _screencastFrame(base64Data: string, metadata: Protocol.Page.ScreencastFrameMetadata): void {
+    if (metadata.codec === 'h264') {
+      this._handleH264Frame(base64Data, metadata);
+      return;
+    }
     this._imageElement.onload = (): void => {
       this._pageScaleFactor = metadata.pageScaleFactor;
       this._screenOffsetTop = metadata.offsetTop;
@@ -286,6 +327,93 @@ export class ScreencastView extends UI.Widget.VBox implements SDK.OverlayModel.H
       this._updateHighlightInOverlayAndRepaint(data, this._highlightConfig);
     };
     this._imageElement.src = 'data:image/jpg;base64,' + base64Data;
+  }
+
+  _base64ToArrayBuffer(base64Data: string): Uint8Array {
+    const binary = atob(base64Data);
+    const bytes = new Uint8Array(binary.length);
+    for (let i = 0; i < binary.length; i++) {
+      bytes[i] = binary.charCodeAt(i);
+    }
+    return bytes;
+  }
+
+  _ensureH264Decoder(codecString: string): void {
+    if (this._h264Decoder && this._h264CodecString === codecString) {
+      return;
+    }
+    this._destroyH264Decoder();
+    if (typeof VideoDecoder === 'undefined') {
+      return;
+    }
+    this._h264Decoder = new VideoDecoder({
+      output: (frame: VideoFrameLike): void => {
+        this._drawH264Frame(frame);
+      },
+      error: (error): void => {
+        console.error('[Screencast] H.264 decode error:', error);
+        this._destroyH264Decoder();
+      },
+    });
+    this._h264Decoder.configure({codec: codecString, optimizeForLatency: true});
+    this._h264CodecString = codecString;
+    this._viewportInitializedForH264 = false;
+  }
+
+  _destroyH264Decoder(): void {
+    if (this._h264Decoder) {
+      try {
+        this._h264Decoder.close();
+      } catch (e) {
+        // ignore close errors during teardown
+      }
+      this._h264Decoder = undefined;
+    }
+    this._h264CodecString = undefined;
+  }
+
+  _handleH264Frame(base64Data: string, metadata: Protocol.Page.ScreencastFrameMetadata): void {
+    if (!metadata.keyFrame || !metadata.codecString) {
+      // Ignore frames until a key frame arrives; the decoder needs the codec
+      // string and an initial key frame to start decoding.
+      return;
+    }
+    this._ensureH264Decoder(metadata.codecString);
+    if (!this._h264Decoder || this._h264Decoder.state !== 'configured') {
+      return;
+    }
+    const bytes = this._base64ToArrayBuffer(base64Data);
+    this._h264Decoder.decode(new EncodedVideoChunk({
+      type: metadata.keyFrame ? 'key' : 'delta',
+      timestamp: metadata.timestamp || 0,
+      data: bytes,
+    }));
+  }
+
+  _drawH264Frame(frame: VideoFrameLike): void {
+    const frameWidth = frame.displayWidth;
+    const frameHeight = frame.displayHeight;
+    // Update the viewport layout once per stream using the first decoded frame.
+    if (!this._viewportInitializedForH264) {
+      this._viewportInitializedForH264 = true;
+      this._pageScaleFactor = 1;
+      const dimensionsCSS = this._viewportDimensions();
+      this._imageZoom = dimensionsCSS.width / frameWidth;
+      this._viewportElement.classList.remove('hidden');
+      const bordersSize = BORDERS_SIZE;
+      if (this._imageZoom < 1.01 / window.devicePixelRatio) {
+        this._imageZoom = 1 / window.devicePixelRatio;
+      }
+      this._viewportElement.style.width = frameWidth * this._imageZoom + bordersSize + 'px';
+      this._viewportElement.style.height = frameHeight * this._imageZoom + bordersSize + 'px';
+    }
+    // Draw the decoded frame across the full canvas.
+    const ctx = this._context;
+    ctx.save();
+    ctx.drawImage(frame as unknown as CanvasImageSource, 0, 0, this._canvasElement.width,
+                 this._canvasElement.height);
+    ctx.restore();
+    frame.close();
   }
 
   _isGlassPaneActive(): boolean {
@@ -535,9 +663,11 @@ export class ScreencastView extends UI.Widget.VBox implements SDK.OverlayModel.H
       this._context.globalCompositeOperation = 'destination-over';
     }
 
-    this._context.drawImage(
-      this._imageElement, 0, this._screenOffsetTop * this._screenZoom,
-      this._imageElement.naturalWidth, this._imageElement.naturalHeight);
+    if (!this._h264Casting) {
+      this._context.drawImage(
+        this._imageElement, 0, this._screenOffsetTop * this._screenZoom,
+        this._imageElement.naturalWidth, this._imageElement.naturalHeight);
+    }
     this._context.restore();
   }
 
