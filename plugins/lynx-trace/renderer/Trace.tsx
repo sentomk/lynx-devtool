@@ -368,21 +368,19 @@ const TraceView: React.FC<ILynxTraceProps> = (props: ILynxTraceProps) => {
 
   const readStreamDataPromise = async (stream: number): Promise<Array<Buffer>> => {
     const dataChunks: Array<Buffer> = [];
-    try {
-      let hasEnd = false;
-      while (!hasEnd) {
-        const message = await sendIOReadMessage(debugDriver, stream);
-        if (!message.result) {
-          return Promise.reject(new Error('no data'));
-        }
-        const chunk = Buffer.from(message?.result?.data ?? '', 'base64');
-        dataChunks.push(chunk);
-        hasEnd = message.result.eof;
+    let hasEnd = false;
+    while (!hasEnd) {
+      const response = await sendIOReadMessage(debugDriver, stream);
+      if (response?.error) {
+        throw new Error(response.error.message ?? 'Failed to read trace data');
       }
-      return Promise.resolve(dataChunks);
-    } catch (e) {
-      return Promise.reject(e);
+      if (!response?.result) {
+        throw new Error('Trace data response is empty');
+      }
+      dataChunks.push(Buffer.from(response.result.data ?? '', 'base64'));
+      hasEnd = response.result.eof;
     }
+    return dataChunks;
   };
 
   const handleTraceComplete = async (msg: Record<string, any>, clientId: number, currentDeviceMap: Record<number, TraceDeviceInfo>) => {
@@ -390,30 +388,33 @@ const TraceView: React.FC<ILynxTraceProps> = (props: ILynxTraceProps) => {
     console.log('has receive TraceComplete: ' + JSON.stringify(runningClient));
     if (runningClient?.traceStarting || runningClient?.traceLoading || msg?.params?.isStartupTracing) {
       const stream = msg?.params?.stream;
-      console.log('start read trace data:');
-      const dataChunks = await readStreamDataPromise(stream);
-      const fileName = `${getFileName(props.info)}.pftrace`.replace(/[\\\/:\*\?"<>\|]/g, '-');
-      asyncBridge
-        .uploadFileToLocal(dataChunks, fileName)
-        .then((res) => {
-          const url = res?.url;
-          console.log('trace url:' + url);
-          if (url) {
-            setTraceUrl(url);
-            setFileName(res?.file);
-            setTraceLoading(clientId, false);
-            const timer = currentDeviceMap[props.clientId ?? 0]?.traceTimer;
-            if (timer) {
-              clearTimeout(timer);
-              setTraceTimer(clientId, null);
-            }
-          } else {
-            setTraceLoading(clientId, false);
-          }
-        })
-        .catch((e) => {
-          console.error(`trace upload failed: ${e}`);
-        });
+      const timer = currentDeviceMap[clientId]?.traceTimer;
+      try {
+        if (msg?.params?.dataLossOccurred || !stream || Number(stream) < 0) {
+          throw new Error('The device failed to create the trace data stream');
+        }
+        console.log('start read trace data:');
+        const dataChunks = await readStreamDataPromise(stream);
+        const fileName = `${getFileName(props.info)}.pftrace`.replace(/[\\\/:\*\?"<>\|]/g, '-');
+        const res = await asyncBridge.uploadFileToLocal(dataChunks, fileName);
+        const url = res?.url;
+        console.log('trace url:' + url);
+        if (!url) {
+          throw new Error('Failed to save trace data locally');
+        }
+        setTraceUrl(url);
+        setFileName(res?.file);
+      } catch (error: any) {
+        const errorMessage = error?.message ?? String(error);
+        console.error(`trace loading failed: ${errorMessage}`);
+        message.error(`Failed to load trace data: ${errorMessage}`);
+      } finally {
+        setTraceLoading(clientId, false);
+        if (timer) {
+          clearTimeout(timer);
+        }
+        setTraceTimer(clientId, null);
+      }
     }
   };
 

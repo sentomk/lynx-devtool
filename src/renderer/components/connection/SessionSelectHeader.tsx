@@ -15,6 +15,8 @@ const PageSession = () => {
   const {
     deviceInfoMap,
     selectedDevice: device,
+    inactiveSessionRevision,
+    isSessionInactive,
     setSelectedSession,
     setStopAtEntry,
     setStopLepusAtEntry,
@@ -37,12 +39,17 @@ const PageSession = () => {
     localStorage.setItem(LDT_CONST.KEY_AUTO_FOCUS_LAST_SESSION, `${value}`);
     setAutoFocus(value);
     if (value && deviceItem.sessions && deviceItem.sessions.length > 0) {
-      setSelectedSession(deviceItem.sessions[0].session_id);
+      const latestVisibleSession = deviceItem.sessions.find(
+        (session) => !isSessionInactive(device.clientId ?? 0, session.session_id)
+      );
+      if (latestVisibleSession) {
+        setSelectedSession(latestVisibleSession.session_id);
+      }
     }
   };
 
   return (
-    <div className="device-session-info">
+    <div className="device-session-info" key={inactiveSessionRevision}>
       <span className={"panel-header"}>Information</span>
       <div className={"device-info-item"}>
         <span className={"left-panel-title"}>App Name</span>

@@ -2565,7 +2565,8 @@ declare namespace ProtocolProxyApi {
     /**
      * Starts sending each frame using the `screencastFrame` event.
      */
-    invoke_startScreencast(params: Protocol.Page.StartScreencastRequest): Promise<Protocol.ProtocolResponseWithError>;
+    invoke_startScreencast(params: Protocol.Page.StartScreencastRequest):
+        Promise<Protocol.Page.StartScreencastResponse>;
 
     /**
      * Force the page stop all navigations and pending resource fetches.
@@ -2766,6 +2767,9 @@ declare namespace ProtocolProxyApi {
      * Fired when the page with currently enabled screencast was shown or hidden `.
      */
     screencastVisibilityChanged(params: Protocol.Page.ScreencastVisibilityChangedEvent): void;
+
+    /** Reports transport negotiation, fallback, and termination for a stream. */
+    screencastStateChanged(params: Protocol.Page.ScreencastStateChangedEvent): void;
 
     /**
      * Fired when a new window is going to be opened, via window.open(), link click, form submission,

@@ -410,6 +410,8 @@ export namespace ProtocolMapping {
      * Fired when the page with currently enabled screencast was shown or hidden `.
      */
     'Page.screencastVisibilityChanged': [Protocol.Page.ScreencastVisibilityChangedEvent];
+    /** Reports transport negotiation, fallback, and termination for a stream. */
+    'Page.screencastStateChanged': [Protocol.Page.ScreencastStateChangedEvent];
     /**
      * Fired when a new window is going to be opened, via window.open(), link click, form submission,
      * etc.
@@ -2270,7 +2272,10 @@ export namespace ProtocolMapping {
     /**
      * Starts sending each frame using the `screencastFrame` event.
      */
-    'Page.startScreencast': {paramsType: [Protocol.Page.StartScreencastRequest?]; returnType: void;};
+    'Page.startScreencast': {
+      paramsType: [Protocol.Page.StartScreencastRequest?];
+      returnType: Protocol.Page.StartScreencastResponse;
+    };
     /**
      * Force the page stop all navigations and pending resource fetches.
      */

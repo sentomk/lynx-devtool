@@ -1034,6 +1034,9 @@ export class PageDispatcher implements ProtocolProxyApi.PageDispatcher {
   screencastVisibilityChanged({}: Protocol.Page.ScreencastVisibilityChangedEvent): void {
   }
 
+  screencastStateChanged({}: Protocol.Page.ScreencastStateChangedEvent): void {
+  }
+
   interstitialShown(): void {
     this._resourceTreeModel._isInterstitialShowing = true;
     this._resourceTreeModel.dispatchEventToListeners(Events.InterstitialShown);

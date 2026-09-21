@@ -2181,6 +2181,9 @@ export function registerCommands(inspectorBackend) {
   inspectorBackend.registerEvent('Page.navigatedWithinDocument', ['frameId', 'url']);
   inspectorBackend.registerEvent('Page.screencastFrame', ['data', 'metadata', 'sessionId']);
   inspectorBackend.registerEvent('Page.screencastVisibilityChanged', ['visible']);
+  inspectorBackend.registerEvent(
+      'Page.screencastStateChanged',
+      ['streamId', 'state', 'format', 'codecString', 'fallbackReason', 'targetFps']);
   inspectorBackend.registerEvent('Page.windowOpen', ['url', 'windowName', 'windowFeatures', 'userGesture']);
   inspectorBackend.registerEvent('Page.compilationCacheProduced', ['url', 'data']);
   inspectorBackend.registerCommand(
@@ -2296,7 +2299,12 @@ export function registerCommands(inspectorBackend) {
   inspectorBackend.registerCommand(
       'Page.removeScriptToEvaluateOnNewDocument', [{'name': 'identifier', 'type': 'string', 'optional': false}], []);
   inspectorBackend.registerCommand(
-      'Page.screencastFrameAck', [{'name': 'sessionId', 'type': 'number', 'optional': false}], []);
+      'Page.screencastFrameAck',
+      [
+        {'name': 'sessionId', 'type': 'number', 'optional': false},
+        {'name': 'streamId', 'type': 'number', 'optional': true}
+      ],
+      []);
   inspectorBackend.registerCommand(
       'Page.searchInResource',
       [
@@ -2370,16 +2378,28 @@ export function registerCommands(inspectorBackend) {
         {'name': 'configuration', 'type': 'string', 'optional': true}
       ],
       []);
-  inspectorBackend.registerEnum('Page.StartScreencastRequestFormat', {Jpeg: 'jpeg', Png: 'png'});
+  inspectorBackend.registerEnum(
+      'Page.LynxScreencastFrameMetadataFrameType', {Full: 'full', Delta: 'delta'});
+  inspectorBackend.registerEnum(
+      'Page.StartScreencastRequestFormat', {Jpeg: 'jpeg', Png: 'png', H264: 'h264'});
+  inspectorBackend.registerEnum(
+      'Page.StartScreencastRequestPreferredFormats', {H264: 'h264', Jpeg: 'jpeg', Png: 'png'});
   inspectorBackend.registerCommand(
       'Page.startScreencast',
       [
-        {'name': 'format', 'type': 'string', 'optional': true}, {'name': 'quality', 'type': 'number', 'optional': true},
+        {'name': 'format', 'type': 'string', 'optional': true},
+        {'name': 'preferredFormats', 'type': 'object', 'optional': true},
+        {'name': 'quality', 'type': 'number', 'optional': true},
         {'name': 'maxWidth', 'type': 'number', 'optional': true},
         {'name': 'maxHeight', 'type': 'number', 'optional': true},
-        {'name': 'everyNthFrame', 'type': 'number', 'optional': true}
+        {'name': 'everyNthFrame', 'type': 'number', 'optional': true},
+        {'name': 'enableBetterScreencast', 'type': 'boolean', 'optional': true},
+        {'name': 'enableFrameSignalGate', 'type': 'boolean', 'optional': true},
+        {'name': 'targetFps', 'type': 'number', 'optional': true},
+        {'name': 'retryCapturePermission', 'type': 'boolean', 'optional': true},
+        {'name': 'mode', 'type': 'string', 'optional': true}
       ],
-      []);
+      ['streamId']);
   inspectorBackend.registerCommand('Page.stopLoading', [], []);
   inspectorBackend.registerCommand('Page.crash', [], []);
   inspectorBackend.registerCommand('Page.close', [], []);

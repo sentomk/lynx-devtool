@@ -215,16 +215,19 @@ class DebugDriver implements IDebugDriver {
   }
 
   async on<T extends EDebugDriverEventNames>(name: T, callback: (payload: IDebugDriverEvent2Payload[T]) => void) {
+    const listeners = this._listenerMap.get(name);
+    if (listeners) {
+      if (!listeners.includes(callback)) {
+        listeners.push(callback);
+      }
+    } else {
+      this._listenerMap.set(name, [callback]);
+    }
+
     try {
       if (this._isRemoteEvent(name)) {
         const driver = await this.getRemoteDebugDriver();
         driver.on(name as ERemoteDebugDriverEventNames, callback as any);
-      }
-
-      if (this._listenerMap.has(name)) {
-        this._listenerMap.get(name)?.push(callback);
-      } else {
-        this._listenerMap.set(name, [callback]);
       }
     } catch {}
   }
@@ -238,7 +241,10 @@ class DebugDriver implements IDebugDriver {
         });
     }
     const listeners = this._listenerMap.get(name);
-    listeners?.splice(listeners.indexOf(callback), 1);
+    const index = listeners?.indexOf(callback) ?? -1;
+    if (index >= 0) {
+      listeners?.splice(index, 1);
+    }
   }
 
   getRemoteDebugDriver(): Promise<IRemoteDebugServer4Driver> {

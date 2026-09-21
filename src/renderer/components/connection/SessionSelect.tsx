@@ -22,6 +22,8 @@ const SessionSelect = () => {
     deviceInfoMap,
     selectedDevice,
     cardFilter,
+    inactiveSessionRevision,
+    isSessionInactive,
     setCardFilter,
     setSelectedSession,
   } = useConnection();
@@ -36,6 +38,9 @@ const SessionSelect = () => {
   if (!deviceInfo) {
     return null;
   }
+  const visibleSessions = (deviceInfo.sessions ?? []).filter(
+    (session) => !isSessionInactive(selectedDevice.clientId!, session.session_id)
+  );
 
   const getDeviceText = () => {
     const { sessions, selectedSession } = deviceInfo;
@@ -95,8 +100,8 @@ const SessionSelect = () => {
             }}
           />
         </div>
-        <div className="device-session-list">
-          {deviceInfo.sessions?.map((session) => (
+        <div className="device-session-list" key={inactiveSessionRevision}>
+          {visibleSessions.map((session) => (
             <Popover
               key={session.session_id}
               placement="leftTop"
@@ -138,7 +143,7 @@ const SessionSelect = () => {
               </div>
             </Popover>
           ))}
-          {(!deviceInfo.sessions || deviceInfo.sessions.length === 0) && <div className="session-empty">No cards available</div>}
+          {visibleSessions.length === 0 && <div className="session-empty">No cards available</div>}
         </div>
       </div>
     );

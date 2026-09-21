@@ -146,6 +146,35 @@
   left: 50%;
 }
 
+.screencast-navigation .screencast-pipeline-toggle {
+  align-items: center;
+  display: flex;
+  flex: none;
+  font-size: 10px;
+  gap: 3px;
+  margin: 0 3px;
+  white-space: nowrap;
+}
+
+.screencast-navigation input.switch-component.screencast-pipeline-switch {
+  flex: none;
+  height: 16px;
+  margin: 0;
+  position: relative;
+  width: 26px;
+}
+
+.screencast-navigation input.switch-component.screencast-pipeline-switch::after {
+  height: 12px;
+  left: 2px;
+  top: 2px;
+  width: 12px;
+}
+
+.screencast-navigation input.switch-component.screencast-pipeline-switch:checked::after {
+  left: 12px;
+}
+
 .screencast-navigation .progress {
   --override-progress-background-color: rgb(66 129 235);
 

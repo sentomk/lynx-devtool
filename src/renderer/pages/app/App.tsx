@@ -34,7 +34,7 @@ const requireWithCatch = (modulePath) => {
 const App = () => {
   const [plugins, setPlugins] = useState<any[]>([]);
 
-  const { openConnection } = useConnection();
+  const { openConnection, updateSessionVisibility } = useConnection();
 
   useEffect(() => {
     document.title = `Lynx DevTool (${queryService.getQuery('version') ?? 'unknown'})${queryService.getQuery('is_prod') === 'true' ? '' : ' (dev)'}`;
@@ -42,6 +42,19 @@ const App = () => {
       openConnection(WS, ROOM_ID);
     }
   }, []);
+
+  useEffect(() => {
+    const listener = (event: MessageEvent) => {
+      if (event.origin !== window.location.origin ||
+          event.data?.type !== 'lynx-screencast-visibility-changed') {
+        return;
+      }
+      const { clientId, sessionId, visible } = event.data;
+      updateSessionVisibility(Number(clientId), Number(sessionId), Boolean(visible));
+    };
+    window.addEventListener('message', listener);
+    return () => window.removeEventListener('message', listener);
+  }, [updateSessionVisibility]);
 
   useEffect(() => {
     ipcRenderer

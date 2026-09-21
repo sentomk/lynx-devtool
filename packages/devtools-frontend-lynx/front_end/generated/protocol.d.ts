@@ -10065,6 +10065,35 @@ declare namespace Protocol {
       transitionType: TransitionType;
     }
 
+    export const enum LynxScreencastFrameMetadataFrameType {
+      Full = 'full',
+      Delta = 'delta',
+    }
+
+    /**
+     * Lynx metadata for composing a full frame from a full or delta image payload.
+     */
+    export interface LynxScreencastFrameMetadata {
+      /** Identifier of this composed frame. */
+      frameId: integer;
+      /** Whether the payload is a complete frame or a delta rectangle. */
+      frameType: LynxScreencastFrameMetadataFrameType;
+      /** Identifier of the frame on which a delta payload must be drawn. */
+      baseFrameId?: integer;
+      /** Width of the composed frame in physical pixels. */
+      fullWidth: integer;
+      /** Height of the composed frame in physical pixels. */
+      fullHeight: integer;
+      /** Horizontal offset of the payload in the composed frame. */
+      x: integer;
+      /** Vertical offset of the payload in the composed frame. */
+      y: integer;
+      /** Width of the payload in physical pixels. */
+      width: integer;
+      /** Height of the payload in physical pixels. */
+      height: integer;
+    }
+
     /**
      * Screencast frame metadata.
      */
@@ -10097,6 +10126,27 @@ declare namespace Protocol {
        * Frame swap timestamp.
        */
       timestamp?: Network.TimeSinceEpoch;
+      /** Identifies one negotiated screencast lifetime. */
+      streamId?: integer;
+      /** Actual payload format selected by the backend. */
+      format?: 'h264'|'jpeg'|'png';
+      /**
+       * Video codec of the frame payload. Present only for video streams
+       * (e.g. "h264"); absent for image frames.
+       */
+      codec?: string;
+      /**
+       * WebCodecs-compatible codec string for initializing a decoder, e.g.
+       * "avc1.42E01E". Present only for video streams.
+       */
+      codecString?: string;
+      /**
+       * Whether the current frame is a key frame. The frontend uses key
+       * frames to initialize the decoder.
+       */
+      keyFrame?: boolean;
+      /** Frame-composition metadata for full and delta JPEG payloads. */
+      lynxFrame?: LynxScreencastFrameMetadata;
     }
 
     /**
@@ -10875,6 +10925,8 @@ declare namespace Protocol {
        * Frame number.
        */
       sessionId: integer;
+      /** Stream being acknowledged. Omitted for legacy backends. */
+      streamId?: integer;
     }
 
     export interface SearchInResourceRequest {
@@ -11080,6 +11132,13 @@ declare namespace Protocol {
     export const enum StartScreencastRequestFormat {
       Jpeg = 'jpeg',
       Png = 'png',
+      H264 = 'h264',
+    }
+
+    export const enum StartScreencastRequestPreferredFormats {
+      H264 = 'h264',
+      Jpeg = 'jpeg',
+      Png = 'png',
     }
 
     export interface StartScreencastRequest {
@@ -11087,6 +11146,8 @@ declare namespace Protocol {
        * Image compression format.
        */
       format?: StartScreencastRequestFormat;
+      /** Ordered transport preferences. Unsupported entries are skipped. */
+      preferredFormats?: StartScreencastRequestPreferredFormats[];
       /**
        * Compression quality from range [0..100].
        */
@@ -11103,10 +11164,22 @@ declare namespace Protocol {
        * Send every n-th frame.
        */
       everyNthFrame?: integer;
+      /** Enables the Lynx 8 FPS target-size, pixel-diff, and delta JPEG pipeline. */
+      enableBetterScreencast?: boolean;
+      enableFrameSignalGate?: boolean;
+      /** Desired maximum frame rate. */
+      targetFps?: integer;
+      /** Whether an explicit user action may retry a previously denied platform screen-capture permission request. */
+      retryCapturePermission?: boolean;
       /**
        * screenshot mode
        */
       mode?: string;
+    }
+
+    export interface StartScreencastResponse extends ProtocolResponseWithError {
+      /** Identifies the negotiated stream. */
+      streamId: integer;
     }
 
     export const enum SetWebLifecycleStateRequestState {
@@ -11487,6 +11560,22 @@ declare namespace Protocol {
        * True if the page is visible.
        */
       visible: boolean;
+    }
+
+    export const enum ScreencastStateChangedEventState {
+      Negotiating = 'negotiating',
+      Streaming = 'streaming',
+      Stopped = 'stopped',
+      Failed = 'failed',
+    }
+
+    export interface ScreencastStateChangedEvent {
+      streamId: integer;
+      state: ScreencastStateChangedEventState;
+      format?: 'h264'|'jpeg'|'png';
+      codecString?: string;
+      fallbackReason?: string;
+      targetFps?: integer;
     }
 
     /**

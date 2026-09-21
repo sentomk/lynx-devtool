@@ -2138,8 +2138,8 @@ importers:
   packages/lynx-devtool-cli:
     dependencies:
       '@lynx-js/debug-router-connector':
-        specifier: 0.0.9
-        version: 0.0.9
+        specifier: 0.0.18-alpha.1
+        version: 0.0.18-alpha.1
       '@lynx-js/lynx-devtool-utils':
         specifier: workspace:*
         version: link:../lynx-devtool-utils
@@ -5886,8 +5886,8 @@ packages:
       react: 17.0.2
     dev: true
 
-  /@lynx-js/debug-router-connector@0.0.9:
-    resolution: {integrity: sha512-QNuAa1s3bKmE/IEcWuROrIlI1TbekmrhSIQE5YaXbsGx0UFEg6MWZUmjU+PJaxjsRQZXq6ujVOkm57krDtY5KQ==}
+  /@lynx-js/debug-router-connector@0.0.18-alpha.1:
+    resolution: {integrity: sha512-WIavN1P6vwRatVjl/rbOpAGsvGFXTbbYb9ruyYgNesH/7pqt+BIaKLLawREuntlxDH9xHs/dUNC9L0fQ1O6IVQ==}
     dependencies:
       '@aws-sdk/client-s3': 3.669.0
       '@devicefarmer/adbkit': 3.2.4
@@ -5897,9 +5897,8 @@ packages:
       chalk: 4.1.2
       debug: 4.3.4
       detect-port: 1.6.1
-      express: 5.1.0
+      find-process: 1.4.7
       fs-extra: 11.1.1
-      ip: 2.0.1
       plist: 3.0.6
       q: 1.5.1
       signal-exit: 4.1.0
@@ -14115,6 +14114,17 @@ packages:
       common-path-prefix: 3.0.0
       pkg-dir: 7.0.0
     dev: true
+
+  /find-process@1.4.7:
+    resolution: {integrity: sha512-/U4CYp1214Xrp3u3Fqr9yNynUrr5Le4y0SsJh2lMDDSbpwYSz3M2SMWQC+wqcx79cN8PQtHQIL8KnuY9M66fdg==}
+    hasBin: true
+    dependencies:
+      chalk: 4.1.0
+      commander: 5.1.0
+      debug: 4.3.1
+    transitivePeerDependencies:
+      - supports-color
+    dev: false
 
   /find-up@2.1.0:
     resolution: {integrity: sha512-NWzkk0jSJtTt08+FBFMvXoeZnOJD+jTtsRmBYbAIzJdX6l7dLgR7CTubCM5/eDdPUBvLCeVasP1brfVR/9/EZQ==}

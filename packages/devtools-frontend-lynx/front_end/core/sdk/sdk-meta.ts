@@ -317,7 +317,7 @@ const UIStrings = {
   /**
   *@description Title of a setting under the Screencast category that can be invoked through the Command Menu
   */
-  screencastFPS: 'Screencast FPS',
+  screencastFPS: 'Screencast frame rate limit',
   /**
   *@description Title of a setting under the Screencast category that can be invoked through the Command Menu
   */
@@ -990,10 +990,15 @@ Common.Settings.registerSettingExtension({
 Common.Settings.registerSettingExtension({
   category: Common.Settings.SettingCategory.SCREENCAST,
   title: i18nLazyString(UIStrings.screencastFPS),
-  settingName: 'screencastFPS',
+  settingName: 'screencastFrameRateLimit',
   settingType: Common.Settings.SettingType.ENUM,
-  defaultValue: '2',
+  defaultValue: '0',
   options: [
+    {
+      title: i18nLazyString('Set screencast FPS to auto'),
+      text: i18nLazyString('Auto'),
+      value: '0',
+    },
     {
       title: i18nLazyString(UIStrings.setScreencastFPS1),
       text: i18nLazyString('1'),
@@ -1014,6 +1019,21 @@ Common.Settings.registerSettingExtension({
       text: i18nLazyString('8'),
       value: '8',
     },
+    {
+      title: i18nLazyString('Set screencast FPS to 15'),
+      text: i18nLazyString('15'),
+      value: '15',
+    },
+    {
+      title: i18nLazyString('Set screencast FPS to 20'),
+      text: i18nLazyString('20'),
+      value: '20',
+    },
+    {
+      title: i18nLazyString('Set screencast FPS to 30'),
+      text: i18nLazyString('30'),
+      value: '30',
+    },
   ],
 });
 
@@ -1022,5 +1042,5 @@ Common.Settings.registerSettingExtension({
   title: i18nLazyString(UIStrings.showLynxSourcesFromSharedContextCards),
   settingName: 'showLynxSharedContextSources',
   settingType: Common.Settings.SettingType.BOOLEAN,
-  defaultValue: false
-})
+  defaultValue: false,
+});

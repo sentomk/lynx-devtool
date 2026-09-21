@@ -14795,6 +14795,23 @@
                     ]
                 },
                 {
+                    "id": "LynxScreencastFrameMetadata",
+                    "description": "Lynx metadata for composing a full frame from a full or delta image payload.",
+                    "experimental": true,
+                    "type": "object",
+                    "properties": [
+                        {"name": "frameId", "description": "Identifier of this composed frame.", "type": "integer"},
+                        {"name": "frameType", "description": "Whether the payload is a complete frame or a delta rectangle.", "type": "string", "enum": ["full", "delta"]},
+                        {"name": "baseFrameId", "description": "Identifier of the frame on which a delta payload must be drawn.", "optional": true, "type": "integer"},
+                        {"name": "fullWidth", "description": "Width of the composed frame in physical pixels.", "type": "integer"},
+                        {"name": "fullHeight", "description": "Height of the composed frame in physical pixels.", "type": "integer"},
+                        {"name": "x", "description": "Horizontal offset of the payload in the composed frame.", "type": "integer"},
+                        {"name": "y", "description": "Vertical offset of the payload in the composed frame.", "type": "integer"},
+                        {"name": "width", "description": "Width of the payload in physical pixels.", "type": "integer"},
+                        {"name": "height", "description": "Height of the payload in physical pixels.", "type": "integer"}
+                    ]
+                },
+                {
                     "id": "ScreencastFrameMetadata",
                     "description": "Screencast frame metadata.",
                     "experimental": true,
@@ -14835,6 +14852,43 @@
                             "description": "Frame swap timestamp.",
                             "optional": true,
                             "$ref": "Network.TimeSinceEpoch"
+                        },
+                        {
+                            "name": "streamId",
+                            "description": "Identifies one negotiated screencast lifetime.",
+                            "optional": true,
+                            "type": "integer"
+                        },
+                        {
+                            "name": "format",
+                            "description": "Actual payload format selected by the backend.",
+                            "optional": true,
+                            "type": "string",
+                            "enum": ["h264", "jpeg", "png"]
+                        },
+                        {
+                            "name": "codec",
+                            "description": "Video codec of the frame payload. Absent for image frames.",
+                            "optional": true,
+                            "type": "string"
+                        },
+                        {
+                            "name": "codecString",
+                            "description": "WebCodecs-compatible decoder configuration string.",
+                            "optional": true,
+                            "type": "string"
+                        },
+                        {
+                            "name": "keyFrame",
+                            "description": "Whether this video payload is independently decodable.",
+                            "optional": true,
+                            "type": "boolean"
+                        },
+                        {
+                            "name": "lynxFrame",
+                            "description": "Frame-composition metadata for full and delta JPEG payloads.",
+                            "optional": true,
+                            "$ref": "LynxScreencastFrameMetadata"
                         }
                     ]
                 },
@@ -15947,6 +16001,12 @@
                             "name": "sessionId",
                             "description": "Frame number.",
                             "type": "integer"
+                        },
+                        {
+                            "name": "streamId",
+                            "description": "Stream being acknowledged. Omitted for legacy backends.",
+                            "optional": true,
+                            "type": "integer"
                         }
                     ]
                 },
@@ -16281,6 +16341,16 @@
                             ]
                         },
                         {
+                            "name": "preferredFormats",
+                            "description": "Ordered transport preferences. Unsupported entries are skipped.",
+                            "optional": true,
+                            "type": "array",
+                            "items": {
+                                "type": "string",
+                                "enum": ["h264", "jpeg", "png"]
+                            }
+                        },
+                        {
                             "name": "quality",
                             "description": "Compression quality from range [0..100].",
                             "optional": true,
@@ -16302,6 +16372,38 @@
                             "name": "everyNthFrame",
                             "description": "Send every n-th frame.",
                             "optional": true,
+                            "type": "integer"
+                        },
+                        {
+                            "name": "enableBetterScreencast",
+                            "description": "Enables the Lynx 8 FPS target-size, pixel-diff, and delta JPEG pipeline.",
+                            "optional": true,
+                            "type": "boolean"
+                        },
+            {"name": "enableFrameSignalGate", "type": "boolean", "optional": true},
+                        {
+                            "name": "targetFps",
+                            "description": "Desired maximum frame rate.",
+                            "optional": true,
+                            "type": "integer"
+                        },
+                        {
+                            "name": "retryCapturePermission",
+                            "description": "Whether an explicit user action may retry a previously denied platform screen-capture permission request.",
+                            "optional": true,
+                            "type": "boolean"
+                        },
+                        {
+                            "name": "mode",
+                            "description": "Lynx screenshot scope (fullscreen or lynxview).",
+                            "optional": true,
+                            "type": "string"
+                        }
+                    ],
+                    "returns": [
+                        {
+                            "name": "streamId",
+                            "description": "Identifies the negotiated stream.",
                             "type": "integer"
                         }
                     ]
@@ -16847,6 +16949,19 @@
                             "description": "True if the page is visible.",
                             "type": "boolean"
                         }
+                    ]
+                },
+                {
+                    "name": "screencastStateChanged",
+                    "description": "Reports transport negotiation, fallback, and termination for a stream.",
+                    "experimental": true,
+                    "parameters": [
+                        {"name": "streamId", "type": "integer"},
+                        {"name": "state", "type": "string", "enum": ["negotiating", "streaming", "stopped", "failed"]},
+                        {"name": "format", "optional": true, "type": "string", "enum": ["h264", "jpeg", "png"]},
+                        {"name": "codecString", "optional": true, "type": "string"},
+                        {"name": "fallbackReason", "optional": true, "type": "string"},
+                        {"name": "targetFps", "optional": true, "type": "integer"}
                     ]
                 },
                 {

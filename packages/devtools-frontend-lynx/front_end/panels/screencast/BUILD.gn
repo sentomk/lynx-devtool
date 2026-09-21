@@ -11,6 +11,7 @@ devtools_module("screencast") {
     "InputModel.ts",
     "ScreencastApp.ts",
     "ScreencastView.ts",
+    "ScreencastWebGLRenderer.ts",
   ]
 
   deps = [

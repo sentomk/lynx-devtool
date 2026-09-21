@@ -42,7 +42,41 @@ import * as Protocol from '../../generated/protocol.js';
 import * as UI from '../../ui/legacy/legacy.js';
 import { postPluginMessage } from '../../core/protocol_client/InspectorBackend.js';
 
+interface EncodedVideoChunkInit {
+  type: 'key'|'delta';
+  timestamp: number;
+  data: Uint8Array;
+}
+declare const EncodedVideoChunk: new (init: EncodedVideoChunkInit) => unknown;
+interface VideoFrameLike {
+  displayWidth: number;
+  displayHeight: number;
+  close(): void;
+}
+interface VideoDecoderLike {
+  readonly state: string;
+  configure(config: {codec: string, optimizeForLatency?: boolean}): void;
+  decode(chunk: unknown): void;
+  close(): void;
+}
+declare const VideoDecoder: new (init: {
+  output: (frame: VideoFrameLike) => void;
+  error: (error: Error) => void;
+}) => VideoDecoderLike;
+
+const WEBGL_RECONSTRUCTION_SD_CAPTURE_SCALE = 0.6;
+const WEBGL_RECONSTRUCTION_SD_JPEG_QUALITY = 40;
+const WEBGL_RECONSTRUCTION_HD_CAPTURE_SCALE = 0.8;
+const WEBGL_RECONSTRUCTION_HD_JPEG_QUALITY = 70;
+const WEBGL_RECONSTRUCTION_SHARPNESS = 0.25;
+
+function lynxFrameMetadata(
+    metadata: Protocol.Page.ScreencastFrameMetadata): Protocol.Page.LynxScreencastFrameMetadata|undefined {
+  return metadata.lynxFrame;
+}
+
 import { InputModel } from './InputModel.js';
+import {ScreencastWebGLRenderer} from './ScreencastWebGLRenderer.js';
 
 const UIStrings = {
   /**
@@ -73,6 +107,14 @@ const UIStrings = {
   *@description Accessible text for the address bar in screencast view
   */
   addressBar: 'Address bar',
+  /**
+  *@description Accessible text for choosing the Lynx screencast pipeline
+  */
+  betterScreencast: 'Screencast pipeline: old or new',
+  /**
+  *@description Accessible text for enabling low-resolution capture with WebGL reconstruction
+  */
+  webGLReconstruction: 'FSR 1 reconstruction: SD uses 0.6 resolution and Q40; HD uses 0.8 resolution and Q70',
 };
 const str_ = i18n.i18n.registerUIStrings('panels/screencast/ScreencastView.ts', UIStrings);
 const i18nString = i18n.i18n.getLocalizedString.bind(undefined, str_);
@@ -127,6 +169,24 @@ export class ScreencastView extends UI.Widget.VBox implements SDK.OverlayModel.H
   _historyEntries?: Protocol.Page.NavigationEntry[];
   _navigationScreenSwitch?: HTMLInputElement;
   _navigationScreenCastModeSwitch?: HTMLInputElement;
+  _navigationBetterScreencastSwitch?: HTMLInputElement;
+  _navigationWebGLReconstructionSwitch?: HTMLInputElement;
+  _navigationFrameSignalGateSwitch?: HTMLInputElement;
+  _frameLayoutKey?: string;
+  _frameCanvas!: HTMLCanvasElement;
+  _frameContext!: CanvasRenderingContext2D;
+  _composedFrameId?: number;
+  _highlightRefreshPending?: boolean;
+  _h264Decoder?: VideoDecoderLike;
+  _h264CodecString?: string;
+  _h264Casting?: boolean;
+  _h264PendingFrames: Protocol.Page.ScreencastFrameMetadata[] = [];
+  _h264FrameVisible?: boolean;
+  _webGLRenderer?: ScreencastWebGLRenderer;
+  _webGLFrameVisible: boolean;
+  _webGLUnavailableLogged: boolean;
+  _requestedPresentationWidth: number;
+  _requestedPresentationHeight: number;
   constructor(screenCaptureModel: SDK.ScreenCaptureModel.ScreenCaptureModel) {
     super();
     this._screenCaptureModel = screenCaptureModel;
@@ -147,6 +207,10 @@ export class ScreencastView extends UI.Widget.VBox implements SDK.OverlayModel.H
     this._screenOffsetTop = 0;
     this._pageScaleFactor = 1;
     this._imageZoom = 1;
+    this._webGLFrameVisible = false;
+    this._webGLUnavailableLogged = false;
+    this._requestedPresentationWidth = 1;
+    this._requestedPresentationHeight = 1;
   }
 
   initialize(): void {
@@ -183,6 +247,10 @@ export class ScreencastView extends UI.Widget.VBox implements SDK.OverlayModel.H
     this._titleElement.style.left = '0';
 
     this._imageElement = new Image();
+    this._frameCanvas = document.createElement('canvas');
+    this._frameCanvas.width = 1;
+    this._frameCanvas.height = 1;
+    this._frameContext = this._frameCanvas.getContext('2d') as CanvasRenderingContext2D;
     this._isCasting = false;
     this._context = this._canvasElement.getContext('2d') as CanvasRenderingContext2D;
     this._checkerboardPattern = this._createCheckerboardPattern(this._context);
@@ -204,6 +272,11 @@ export class ScreencastView extends UI.Widget.VBox implements SDK.OverlayModel.H
   }
 
   _startCasting(): void {
+    console.info('[ScreencastLifecycle] frontend start requested', {
+      targetId: this._screenCaptureModel.target().id(),
+      url: this._screenCaptureModel.target().inspectedURL(),
+      isCasting: this._isCasting,
+    });
     if (SDK.TargetManager.TargetManager.instance().allTargetsSuspended()) {
       return;
     }
@@ -220,14 +293,30 @@ export class ScreencastView extends UI.Widget.VBox implements SDK.OverlayModel.H
     }
 
     this._isCasting = true;
+    this._frameLayoutKey = undefined;
+    this._composedFrameId = undefined;
     const maxImageDimension = 2048;
+    const enableBetterScreencast =
+        Common.Settings.Settings.instance().createSetting<boolean>('enableBetterScreencast', true).get();
+    const hdSetting = localStorage.getItem('isHD');
+    const isHD = hdSetting !== null && hdSetting !== 'false';
     dimensions.width *= window.devicePixelRatio;
     dimensions.height *= window.devicePixelRatio;
-    const qualityValue = (!localStorage.getItem('isHD') || localStorage.getItem('isHD') === 'false') ? 20 : 100;
+    const useWebGLReconstruction = enableBetterScreencast && this._webGLReconstructionRequested();
+    this._requestedPresentationWidth = Math.floor(Math.min(maxImageDimension, dimensions.width));
+    this._requestedPresentationHeight = Math.floor(dimensions.height);
+    const captureScale = useWebGLReconstruction
+        ? (isHD ? WEBGL_RECONSTRUCTION_HD_CAPTURE_SCALE : WEBGL_RECONSTRUCTION_SD_CAPTURE_SCALE)
+        : 1;
+    const qualityValue = useWebGLReconstruction
+        ? (isHD ? WEBGL_RECONSTRUCTION_HD_JPEG_QUALITY : WEBGL_RECONSTRUCTION_SD_JPEG_QUALITY)
+        : (isHD ? 100 : 20);
     // Note: startScreencast width and height are expected to be integers so must be floored.
-    let format = Protocol.Page.StartScreencastRequestFormat.Jpeg;
-    let maxWidth = Math.floor(Math.min(maxImageDimension, dimensions.width));
-    let maxHeight = Math.floor(dimensions.height);
+    this._h264Casting = false;
+    this._webGLFrameVisible = false;
+    const format = Protocol.Page.StartScreencastRequestFormat.Jpeg;
+    const maxWidth = Math.max(1, Math.floor(this._requestedPresentationWidth * captureScale));
+    const maxHeight = Math.max(1, Math.floor(this._requestedPresentationHeight * captureScale));
     this._screenCaptureModel.startScreencast(
       format,
       qualityValue,
@@ -235,7 +324,12 @@ export class ScreencastView extends UI.Widget.VBox implements SDK.OverlayModel.H
       maxHeight,
       undefined,
       this._screencastFrame.bind(this),
-      this._screencastVisibilityChanged.bind(this)
+      this._screencastVisibilityChanged.bind(this),
+      undefined,
+      false,
+      enableBetterScreencast,
+      enableBetterScreencast && Common.Settings.Settings.instance()
+          .createSetting<boolean>('enableFrameSignalGate', false).get(),
     );
     for (const emulationModel of SDK.TargetManager.TargetManager.instance().models(SDK.EmulationModel.EmulationModel)) {
       emulationModel.overrideEmulateTouch(true);
@@ -246,10 +340,17 @@ export class ScreencastView extends UI.Widget.VBox implements SDK.OverlayModel.H
   }
 
   _stopCasting(): void {
+    console.info('[ScreencastLifecycle] frontend stop requested', {
+      targetId: this._screenCaptureModel.target().id(),
+      url: this._screenCaptureModel.target().inspectedURL(),
+      isCasting: this._isCasting,
+    });
     if (!this._isCasting) {
       return;
     }
     this._isCasting = false;
+    this._webGLFrameVisible = false;
+    this._destroyH264Decoder();
     this._screenCaptureModel.stopScreencast();
     for (const emulationModel of SDK.TargetManager.TargetManager.instance().models(SDK.EmulationModel.EmulationModel)) {
       emulationModel.overrideEmulateTouch(false);
@@ -259,33 +360,276 @@ export class ScreencastView extends UI.Widget.VBox implements SDK.OverlayModel.H
     }
   }
 
-  _screencastFrame(base64Data: string, metadata: Protocol.Page.ScreencastFrameMetadata): void {
-    this._imageElement.onload = (): void => {
+  _screencastFrame(base64Data: string, metadata: Protocol.Page.ScreencastFrameMetadata): void|Promise<void> {
+    if (metadata.format === 'h264' || metadata.codec === 'h264') {
+      this._handleH264Frame(base64Data, metadata);
+      return;
+    }
+    this._destroyH264Decoder();
+    return new Promise(resolve => {
+      // A cached full frame and the first live frame can arrive back-to-back
+      // when a card is resumed. Keep their decoder state independent; sharing
+      // one Image would let the later payload overwrite the earlier onload/src
+      // pair and associate image bytes with the wrong delta metadata.
+      const image = new Image();
+      const complete = (): void => {
+        image.onload = null;
+        image.onerror = null;
+        resolve();
+      };
+      image.onload = async (): Promise<void> => {
+        try {
+          const frame = lynxFrameMetadata(metadata);
+          const fullWidth = frame?.fullWidth ?? image.naturalWidth;
+          const fullHeight = frame?.fullHeight ?? image.naturalHeight;
+          if (frame?.frameType === 'delta') {
+            const baseMatches = frame.baseFrameId !== undefined && frame.baseFrameId === this._composedFrameId;
+            const dimensionsMatch =
+                this._frameCanvas.width === fullWidth && this._frameCanvas.height === fullHeight;
+            if (!baseMatches || !dimensionsMatch) {
+              console.warn('[Screencast] Ignoring delta frame with a missing base frame.', {
+                frameId: frame.frameId,
+                baseFrameId: frame.baseFrameId,
+                composedFrameId: this._composedFrameId,
+              });
+              return;
+            }
+            const deltaX = frame.x;
+            const deltaY = frame.y;
+            const deltaWidth = frame.width;
+            const deltaHeight = frame.height;
+            this._frameContext.drawImage(
+                image, 0, 0, image.naturalWidth, image.naturalHeight,
+                deltaX, deltaY, deltaWidth, deltaHeight);
+          } else {
+            if (this._frameCanvas.width !== fullWidth || this._frameCanvas.height !== fullHeight) {
+              this._frameCanvas.width = fullWidth;
+              this._frameCanvas.height = fullHeight;
+            } else {
+              this._frameContext.clearRect(0, 0, fullWidth, fullHeight);
+            }
+            this._frameContext.drawImage(image, 0, 0, fullWidth, fullHeight);
+          }
+          this._imageElement = image;
+          this._composedFrameId = frame?.frameId;
+          this._updateWebGLFrame();
+
+          this._pageScaleFactor = metadata.pageScaleFactor;
+          this._screenOffsetTop = metadata.offsetTop;
+          this._scrollOffsetX = metadata.scrollOffsetX;
+          this._scrollOffsetY = metadata.scrollOffsetY;
+
+          const presentationFrame = this._presentedFrameCanvas();
+          const presentationWidth = presentationFrame.width;
+          const presentationHeight = presentationFrame.height;
+          const frameLayoutKey = [
+            'jpeg',
+            presentationWidth,
+            presentationHeight,
+            metadata.deviceWidth,
+            metadata.deviceHeight,
+            window.devicePixelRatio,
+            this._webGLFrameVisible,
+          ].join(':');
+          if (frameLayoutKey !== this._frameLayoutKey) {
+            this._frameLayoutKey = frameLayoutKey;
+            const dimensionsCSS = this._viewportDimensions();
+            this._imageZoom = dimensionsCSS.width / presentationWidth;
+            this._viewportElement.classList.remove('hidden');
+            const bordersSize = BORDERS_SIZE;
+            if (this._imageZoom < 1.01 / window.devicePixelRatio) {
+              this._imageZoom = 1 / window.devicePixelRatio;
+            }
+            this._screenZoom = presentationWidth / metadata.deviceWidth;
+            this._viewportElement.style.width =
+                metadata.deviceWidth * this._screenZoom * this._imageZoom + bordersSize + 'px';
+            this._viewportElement.style.height =
+                metadata.deviceHeight * this._screenZoom * this._imageZoom + bordersSize + 'px';
+          }
+
+          // Present the frame before doing any DOM/highlight RPC. A selected
+          // element's boxModel request may be slow or never resolve when the
+          // page is transitioning; tying the frame ACK to that request stalls
+          // the complete screencast pipeline.
+          this._repaint();
+          this._refreshHighlightForCurrentFrame();
+        } catch (error) {
+          console.error('Failed to render screencast frame:', error);
+        } finally {
+          complete();
+        }
+      };
+      image.onerror = complete;
+      const mimeType = metadata.format === 'png' ? 'image/png' : 'image/jpeg';
+      image.src = `data:${mimeType};base64,${base64Data}`;
+    });
+  }
+
+  _base64ToBytes(base64Data: string): Uint8Array {
+    return ScreencastView.base64ToBytes(base64Data);
+  }
+
+  static base64ToBytes(base64Data: string): Uint8Array {
+    const binary = atob(base64Data);
+    const bytes = new Uint8Array(binary.length);
+    for (let index = 0; index < binary.length; ++index) {
+      bytes[index] = binary.charCodeAt(index);
+    }
+    return bytes;
+  }
+
+  _webGLReconstructionRequested(): boolean {
+    const settings = Common.Settings.Settings.instance();
+    return settings.createSetting<boolean>('enableBetterScreencast', true).get() &&
+        settings.createSetting<boolean>('enableScreencastWebGLReconstruction', false).get();
+  }
+
+  _updateWebGLFrame(): void {
+    this._webGLFrameVisible = false;
+    if (!this._webGLReconstructionRequested() || this._frameCanvas.width <= 1 || this._frameCanvas.height <= 1) {
+      return;
+    }
+    try {
+      this._webGLRenderer ??= new ScreencastWebGLRenderer();
+      const scale = Math.max(1, Math.min(
+          this._requestedPresentationWidth / this._frameCanvas.width,
+          this._requestedPresentationHeight / this._frameCanvas.height));
+      const outputWidth = Math.max(this._frameCanvas.width, Math.round(this._frameCanvas.width * scale));
+      const outputHeight = Math.max(this._frameCanvas.height, Math.round(this._frameCanvas.height * scale));
+      this._webGLRenderer.render(
+          this._frameCanvas, outputWidth, outputHeight, WEBGL_RECONSTRUCTION_SHARPNESS);
+      this._webGLFrameVisible = true;
+      this._webGLUnavailableLogged = false;
+    } catch (error) {
+      if (!this._webGLUnavailableLogged) {
+        console.warn('[Screencast] WebGL reconstruction unavailable; showing the captured frame.', error);
+        this._webGLUnavailableLogged = true;
+      }
+    }
+  }
+
+  _presentedFrameCanvas(): HTMLCanvasElement {
+    if (this._webGLFrameVisible && this._webGLRenderer) {
+      return this._webGLRenderer.canvas;
+    }
+    return this._frameCanvas;
+  }
+
+  _ensureH264Decoder(codecString: string): boolean {
+    if (this._h264Decoder && this._h264CodecString === codecString) {
+      return true;
+    }
+    this._destroyH264Decoder();
+    if (typeof VideoDecoder === 'undefined') {
+      return false;
+    }
+    try {
+      this._h264Decoder = new VideoDecoder({
+        output: frame => this._drawH264Frame(frame),
+        error: error => {
+          console.error('[Screencast] H.264 decode error:', error);
+          this._destroyH264Decoder();
+        },
+      });
+      this._h264Decoder.configure({codec: codecString, optimizeForLatency: true});
+      this._h264CodecString = codecString;
+      return true;
+    } catch (error) {
+      console.error('[Screencast] Unable to configure H.264 decoder:', error);
+      this._destroyH264Decoder();
+      return false;
+    }
+  }
+
+  _destroyH264Decoder(): void {
+    this._h264PendingFrames = [];
+    this._h264FrameVisible = false;
+    if (this._h264Decoder) {
+      try {
+        this._h264Decoder.close();
+      } catch {
+        // Decoder teardown is best effort when a target is navigating away.
+      }
+    }
+    this._h264Decoder = undefined;
+    this._h264CodecString = undefined;
+  }
+
+  _handleH264Frame(base64Data: string, metadata: Protocol.Page.ScreencastFrameMetadata): void {
+    const codecString = metadata.codecString;
+    if (!codecString || (!this._h264Decoder && !metadata.keyFrame) ||
+        !this._ensureH264Decoder(codecString) || !this._h264Decoder ||
+        this._h264Decoder.state !== 'configured') {
+      return;
+    }
+    this._h264PendingFrames.push(metadata);
+    try {
+      this._h264Decoder.decode(new EncodedVideoChunk({
+        type: metadata.keyFrame ? 'key' : 'delta',
+        timestamp: Math.round((metadata.timestamp || 0) * 1_000_000),
+        data: this._base64ToBytes(base64Data),
+      }));
+    } catch (error) {
+      console.error('[Screencast] Unable to submit H.264 frame:', error);
+      this._h264PendingFrames.pop();
+    }
+  }
+
+  _drawH264Frame(frame: VideoFrameLike): void {
+    const metadata = this._h264PendingFrames.shift();
+    if (!metadata) {
+      frame.close();
+      return;
+    }
+    this._presentH264Frame(frame, metadata);
+  }
+
+  _presentH264Frame(
+      frame: VideoFrameLike, metadata: Protocol.Page.ScreencastFrameMetadata): void {
+    try {
+      const width = frame.displayWidth;
+      const height = frame.displayHeight;
+      if (width <= 0 || height <= 0) {
+        return;
+      }
+      if (this._frameCanvas.width !== width || this._frameCanvas.height !== height) {
+        this._frameCanvas.width = width;
+        this._frameCanvas.height = height;
+      }
       this._pageScaleFactor = metadata.pageScaleFactor;
       this._screenOffsetTop = metadata.offsetTop;
       this._scrollOffsetX = metadata.scrollOffsetX;
       this._scrollOffsetY = metadata.scrollOffsetY;
-
-      const deviceSizeRatio = metadata.deviceHeight / metadata.deviceWidth;
-      const dimensionsCSS = this._viewportDimensions();
-
-      // this._imageZoom = Math.min(
-      //     dimensionsCSS.width / this._imageElement.naturalWidth,
-      //     dimensionsCSS.height / (this._imageElement.naturalWidth * deviceSizeRatio));
-      this._imageZoom = dimensionsCSS.width / this._imageElement.naturalWidth;
-      this._viewportElement.classList.remove('hidden');
-      const bordersSize = BORDERS_SIZE;
-      if (this._imageZoom < 1.01 / window.devicePixelRatio) {
-        this._imageZoom = 1 / window.devicePixelRatio;
+      const frameLayoutKey = [width, height, metadata.deviceWidth, metadata.deviceHeight,
+                              window.devicePixelRatio].join(':');
+      if (frameLayoutKey !== this._frameLayoutKey) {
+        this._frameLayoutKey = frameLayoutKey;
+        const dimensionsCSS = this._viewportDimensions();
+        this._imageZoom = dimensionsCSS.width / width;
+        this._viewportElement.classList.remove('hidden');
+        if (this._imageZoom < 1.01 / window.devicePixelRatio) {
+          this._imageZoom = 1 / window.devicePixelRatio;
+        }
+        this._screenZoom = width / metadata.deviceWidth;
+        this._viewportElement.style.width =
+            metadata.deviceWidth * this._screenZoom * this._imageZoom + BORDERS_SIZE + 'px';
+        this._viewportElement.style.height =
+            metadata.deviceHeight * this._screenZoom * this._imageZoom + BORDERS_SIZE + 'px';
       }
-      this._screenZoom = this._canvasWidth / metadata.deviceWidth;
-      this._viewportElement.style.width = metadata.deviceWidth * this._screenZoom * this._imageZoom + bordersSize + 'px';
-      this._viewportElement.style.height = metadata.deviceHeight * this._screenZoom * this._imageZoom + bordersSize + 'px';
-
-      const data = this._highlightNode ? { node: this._highlightNode, selectorList: undefined } : { clear: true };
-      this._updateHighlightInOverlayAndRepaint(data, this._highlightConfig);
-    };
-    this._imageElement.src = 'data:image/jpg;base64,' + base64Data;
+      if (this._canvasElement.width !== this._canvasWidth ||
+          this._canvasElement.height !== this._canvasHeight) {
+        this._canvasElement.width = this._canvasWidth;
+        this._canvasElement.height = this._canvasHeight;
+      }
+      // WebCodecs has already produced a GPU-backed VideoFrame. Present it
+      // immediately instead of waiting for another animation frame and
+      // copying it through the JPEG composition canvas first.
+      this._context.globalCompositeOperation = 'source-over';
+      this._context.drawImage(frame as unknown as CanvasImageSource, 0, 0, width, height);
+      this._h264FrameVisible = true;
+    } finally {
+      frame.close();
+    }
   }
 
   _isGlassPaneActive(): boolean {
@@ -293,8 +637,20 @@ export class ScreencastView extends UI.Widget.VBox implements SDK.OverlayModel.H
   }
 
   _screencastVisibilityChanged(visible: boolean): void {
+    console.info('[ScreencastLifecycle] frontend visibility', {
+      targetId: this._screenCaptureModel.target().id(),
+      url: this._screenCaptureModel.target().inspectedURL(),
+      visible,
+    });
     this._targetInactive = !visible;
     this._updateGlasspane();
+    const query = new URLSearchParams(window.location.search);
+    window.parent.postMessage({
+      type: 'lynx-screencast-visibility-changed',
+      clientId: Number(query.get('clientId')),
+      sessionId: Number(query.get('sessionId')),
+      visible,
+    }, window.location.origin);
   }
 
   _onSuspendStateChange(_event: Common.EventTarget.EventTargetEvent): void {
@@ -352,8 +708,8 @@ export class ScreencastView extends UI.Widget.VBox implements SDK.OverlayModel.H
       return;
     }
 
-    postPluginMessage("uitree-panel", { UINodeId: node.id });
-    postPluginMessage("uitree-drawer", { UINodeId: node.id });
+    postPluginMessage('uitree-panel', { UINodeId: node.id });
+    postPluginMessage('uitree-drawer', { UINodeId: node.id });
     window.postMessage({
       type: 'panel:preact_devtools',
       content: {
@@ -362,7 +718,7 @@ export class ScreencastView extends UI.Widget.VBox implements SDK.OverlayModel.H
           UINodeId: node.id,
         },
       },
-    }, '*')
+    }, '*');
 
     if (event.type === 'mousemove') {
       this._updateHighlightInOverlayAndRepaint({ node, selectorList: undefined }, this._inspectModeConfig);
@@ -373,7 +729,7 @@ export class ScreencastView extends UI.Widget.VBox implements SDK.OverlayModel.H
       if (inspectorView._tabbedPane.selectedTabId === 'uitree-panel') {
         inspectorView._tabbedPane.selectTab('elements');
         inspectorView.showPanel('uitree-drawer');
-        postPluginMessage("uitree-drawer", { UINodeId: node.id });
+        postPluginMessage('uitree-drawer', { UINodeId: node.id });
         this._overlayModel?.setHighlighter(this);
       }
 
@@ -460,15 +816,38 @@ export class ScreencastView extends UI.Widget.VBox implements SDK.OverlayModel.H
     }
 
     this._node = node;
-    node.boxModel().then(model => {
-      if (!model || !this._pageScaleFactor) {
-        this._repaint();
-        return;
-      }
-      this._model = this._scaleModel(model);
-      this._config = config;
+    const model = await node.boxModel();
+    if (!model || !this._pageScaleFactor) {
       this._repaint();
-    });
+      return;
+    }
+    this._model = this._scaleModel(model);
+    this._config = config;
+    this._repaint();
+  }
+
+  _refreshHighlightForCurrentFrame(): void {
+    const node = this._highlightNode;
+    if (!node || this._highlightRefreshPending) {
+      return;
+    }
+    const config = this._highlightConfig;
+    this._highlightRefreshPending = true;
+    void node.boxModel()
+        .then(model => {
+          if (node !== this._highlightNode || !model || !this._pageScaleFactor) {
+            return;
+          }
+          this._model = this._scaleModel(model);
+          this._config = config;
+          this._repaint();
+        })
+        .catch(error => {
+          console.warn('Failed to refresh screencast highlight:', error);
+        })
+        .finally(() => {
+          this._highlightRefreshPending = false;
+        });
   }
 
   _scaleModel(model: Protocol.DOM.BoxModel): Protocol.DOM.BoxModel {
@@ -489,10 +868,18 @@ export class ScreencastView extends UI.Widget.VBox implements SDK.OverlayModel.H
   _repaint(): void {
     const model = this._model;
     const config = this._config;
+    const preserveH264Frame = Boolean(this._h264Decoder && this._h264FrameVisible);
+    const frameCanvas = this._presentedFrameCanvas();
 
-    // set canvas size with image natural size
-    this._canvasElement.width = this._canvasWidth;
-    this._canvasElement.height = this._canvasHeight;
+    // Resizing a canvas reallocates and clears its backing store. Avoid doing
+    // that for every frame when the screencast dimensions are unchanged.
+    if (this._canvasElement.width !== this._canvasWidth || this._canvasElement.height !== this._canvasHeight) {
+      this._canvasElement.width = this._canvasWidth;
+      this._canvasElement.height = this._canvasHeight;
+    } else if (!preserveH264Frame) {
+      this._context.clearRect(0, 0, this._canvasWidth, this._canvasHeight);
+    }
+    this._context.globalCompositeOperation = 'source-over';
     this._context.save();
 
     // Paint top and bottom gutter.
@@ -501,7 +888,7 @@ export class ScreencastView extends UI.Widget.VBox implements SDK.OverlayModel.H
     }
     this._context.fillRect(0, 0, this._canvasWidth, this._screenOffsetTop * this._screenZoom);
     this._context.fillRect(
-      0, this._screenOffsetTop * this._screenZoom + this._imageElement.naturalHeight, this._canvasWidth,
+      0, this._screenOffsetTop * this._screenZoom + frameCanvas.height, this._canvasWidth,
       this._canvasHeight);
     this._context.restore();
 
@@ -535,10 +922,13 @@ export class ScreencastView extends UI.Widget.VBox implements SDK.OverlayModel.H
       this._context.globalCompositeOperation = 'destination-over';
     }
 
-    this._context.drawImage(
-      this._imageElement, 0, this._screenOffsetTop * this._screenZoom,
-      this._imageElement.naturalWidth, this._imageElement.naturalHeight);
+    if (!preserveH264Frame) {
+      this._context.drawImage(
+        frameCanvas, 0, this._screenOffsetTop * this._screenZoom,
+        frameCanvas.width, frameCanvas.height);
+    }
     this._context.restore();
+    this._context.globalCompositeOperation = 'source-over';
   }
 
   _cssColor(color: Protocol.DOM.RGBA): string {
@@ -655,11 +1045,11 @@ export class ScreencastView extends UI.Widget.VBox implements SDK.OverlayModel.H
   }
 
   get _canvasWidth(): number {
-    return this._imageElement.naturalWidth || 1;
+    return this._presentedFrameCanvas()?.width || this._imageElement.naturalWidth || 1;
   }
 
   get _canvasHeight(): number {
-    return this._imageElement.naturalHeight || 1
+    return this._presentedFrameCanvas()?.height || this._imageElement.naturalHeight || 1;
   }
 
   _cssToCanvas(num: number): number {
@@ -715,8 +1105,8 @@ export class ScreencastView extends UI.Widget.VBox implements SDK.OverlayModel.H
     UI.ARIAUtils.setAccessibleName(this._navigationForward, i18nString(UIStrings.forward));
     this._navigationReload = this._navigationBar.createChild('button', 'reload');
     UI.ARIAUtils.setAccessibleName(this._navigationReload, i18nString(UIStrings.reload));
-    let reloadText = this._navigationBar.createChild('span', 'title-heigh');
-    let tmp0 = document.createTextNode('Reload');
+    const reloadText = this._navigationBar.createChild('span', 'title-heigh');
+    const tmp0 = document.createTextNode('Reload');
     reloadText.appendChild(tmp0);
 
     const spanValue = this._navigationBar.createChild('span', 'title-heigh');
@@ -732,11 +1122,49 @@ export class ScreencastView extends UI.Widget.VBox implements SDK.OverlayModel.H
     screencastModeLynx.style.marginLeft = '10px';
     screencastModeLynx.appendChild(document.createTextNode('LynxView'));
     this._navigationScreenCastModeSwitch = UI.UIUtils.createInput('switch-component', 'checkbox') as HTMLInputElement;
-    this._navigationScreenCastModeSwitch.checked = Common.Settings.Settings.instance().createSetting<string>("pageScreencastMode", 'fullscreen').get() === 'fullscreen';
+    this._navigationScreenCastModeSwitch.checked = Common.Settings.Settings.instance().createSetting<string>('pageScreencastMode', 'fullscreen').get() === 'fullscreen';
     this._navigationScreenCastModeSwitch.style.marginLeft = '54px';
     screencastModeLynx.appendChild(this._navigationScreenCastModeSwitch);
     const screencastModeFullScreen = this._navigationBar.createChild('span', 'title-low');
     screencastModeFullScreen.appendChild(document.createTextNode('FullScreen'));
+
+    const betterScreencastToggle = this._navigationBar.createChild('label', 'screencast-pipeline-toggle');
+    betterScreencastToggle.appendChild(document.createTextNode('Old'));
+    this._navigationBetterScreencastSwitch =
+        UI.UIUtils.createInput('switch-component screencast-pipeline-switch', 'checkbox') as HTMLInputElement;
+    this._navigationBetterScreencastSwitch.checked =
+        Common.Settings.Settings.instance().createSetting<boolean>('enableBetterScreencast', true).get();
+    UI.ARIAUtils.setAccessibleName(
+        this._navigationBetterScreencastSwitch, i18nString(UIStrings.betterScreencast));
+    betterScreencastToggle.appendChild(this._navigationBetterScreencastSwitch);
+    betterScreencastToggle.appendChild(document.createTextNode('New'));
+
+    const webGLReconstructionToggle = this._navigationBar.createChild('label', 'screencast-pipeline-toggle');
+    webGLReconstructionToggle.appendChild(document.createTextNode('Native'));
+    this._navigationWebGLReconstructionSwitch =
+        UI.UIUtils.createInput('switch-component screencast-pipeline-switch', 'checkbox') as HTMLInputElement;
+    this._navigationWebGLReconstructionSwitch.checked = Common.Settings.Settings.instance()
+        .createSetting<boolean>('enableScreencastWebGLReconstruction', false).get();
+    UI.ARIAUtils.setAccessibleName(
+        this._navigationWebGLReconstructionSwitch, i18nString(UIStrings.webGLReconstruction));
+    webGLReconstructionToggle.appendChild(this._navigationWebGLReconstructionSwitch);
+    webGLReconstructionToggle.appendChild(document.createTextNode('FSR'));
+    const gateToggle = this._navigationBar.createChild('label', 'screencast-pipeline-toggle');
+    gateToggle.appendChild(document.createTextNode('跳过静态'));
+    this._navigationFrameSignalGateSwitch =
+        UI.UIUtils.createInput('switch-component screencast-pipeline-switch', 'checkbox') as HTMLInputElement;
+    this._navigationFrameSignalGateSwitch.checked = Common.Settings.Settings.instance()
+        .createSetting<boolean>('enableFrameSignalGate', false).get();
+    UI.ARIAUtils.setAccessibleName(this._navigationFrameSignalGateSwitch,
+        '跳过静态：无新帧信号时跳过采集，每秒兜底截图一次，仅 New 模式生效');
+    gateToggle.appendChild(this._navigationFrameSignalGateSwitch);
+    this._navigationFrameSignalGateSwitch.addEventListener('change', () => {
+      Common.Settings.Settings.instance().createSetting<boolean>('enableFrameSignalGate', false)
+          .set(this._navigationFrameSignalGateSwitch?.checked ?? false);
+      this._stopCasting();
+      this._startCasting();
+    });
+    this._updateScreencastControlState();
 
     this._navigationUrl = UI.UIUtils.createInput() as HTMLInputElement;
     UI.ARIAUtils.setAccessibleName(this._navigationUrl, i18nString(UIStrings.addressBar));
@@ -752,6 +1180,10 @@ export class ScreencastView extends UI.Widget.VBox implements SDK.OverlayModel.H
       this._navigationReload.addEventListener('click', this._navigateReload.bind(this), false);
       this._navigationScreenSwitch.addEventListener('click', this._navigateScreenCastQuality.bind(this), false);
       this._navigationScreenCastModeSwitch?.addEventListener('click', this._navigationScreenCastModeChange.bind(this));
+      this._navigationBetterScreencastSwitch?.addEventListener(
+          'change', this._navigationBetterScreencastChange.bind(this));
+      this._navigationWebGLReconstructionSwitch?.addEventListener(
+          'change', this._navigationWebGLReconstructionChange.bind(this));
       this._navigationUrl.addEventListener('keyup', this._navigationUrlKeyUp.bind(this), true);
       this._requestNavigationHistory();
       this._resourceTreeModel.addEventListener(
@@ -787,8 +1219,8 @@ export class ScreencastView extends UI.Widget.VBox implements SDK.OverlayModel.H
       content: {
         type: 'a11y_start_mark',
         // @ts-ignore
-        message: window.sessionUrl
-      }
+        message: window.sessionUrl,
+      },
     });
   }
   _navigateScreenCastQuality(event: MouseEvent): void {
@@ -799,11 +1231,37 @@ export class ScreencastView extends UI.Widget.VBox implements SDK.OverlayModel.H
   }
   _navigationScreenCastModeChange(event: MouseEvent): void {
     const mode = (event.target as HTMLInputElement).checked ? 'fullscreen' : 'lynxview';
-    Common.Settings.Settings.instance().createSetting<string>("pageScreencastMode", 'fullscreen').set(mode);
+    Common.Settings.Settings.instance().createSetting<string>('pageScreencastMode', 'fullscreen').set(mode);
+    this._updateScreencastControlState();
     this._stopCasting();
     this._startCasting();
   }
-
+  _navigationBetterScreencastChange(event: Event): void {
+    const enabled = (event.target as HTMLInputElement).checked;
+    Common.Settings.Settings.instance().createSetting<boolean>('enableBetterScreencast', true).set(enabled);
+    this._updateScreencastControlState();
+    this._stopCasting();
+    this._frameContext.clearRect(0, 0, this._frameCanvas.width, this._frameCanvas.height);
+    this._startCasting();
+  }
+  _navigationWebGLReconstructionChange(event: Event): void {
+    const enabled = (event.target as HTMLInputElement).checked;
+    Common.Settings.Settings.instance()
+        .createSetting<boolean>('enableScreencastWebGLReconstruction', false).set(enabled);
+    this._updateScreencastControlState();
+    this._stopCasting();
+    this._frameContext.clearRect(0, 0, this._frameCanvas.width, this._frameCanvas.height);
+    this._startCasting();
+  }
+  _updateScreencastControlState(): void {
+    const betterEnabled = this._navigationBetterScreencastSwitch?.checked ?? false;
+    if (this._navigationFrameSignalGateSwitch) {
+      this._navigationFrameSignalGateSwitch.disabled = !betterEnabled;
+    }
+    if (this._navigationWebGLReconstructionSwitch) {
+      this._navigationWebGLReconstructionSwitch.disabled = !betterEnabled;
+    }
+  }
   _navigationUrlKeyUp(event: KeyboardEvent): void {
     if (event.key !== 'Enter') {
       return;

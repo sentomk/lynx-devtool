@@ -6845,6 +6845,30 @@ domain Page
       # Transition type.
       TransitionType transitionType
 
+  # Lynx metadata for composing a full frame from a full or delta image payload.
+  experimental type LynxScreencastFrameMetadata extends object
+    properties
+      # Identifier of this composed frame.
+      integer frameId
+      # Whether the payload is a complete frame or a delta rectangle.
+      enum frameType
+        full
+        delta
+      # Identifier of the frame on which a delta payload must be drawn.
+      optional integer baseFrameId
+      # Width of the composed frame in physical pixels.
+      integer fullWidth
+      # Height of the composed frame in physical pixels.
+      integer fullHeight
+      # Horizontal offset of the payload in the composed frame.
+      integer x
+      # Vertical offset of the payload in the composed frame.
+      integer y
+      # Width of the payload in physical pixels.
+      integer width
+      # Height of the payload in physical pixels.
+      integer height
+
   # Screencast frame metadata.
   experimental type ScreencastFrameMetadata extends object
     properties
@@ -6862,6 +6886,23 @@ domain Page
       number scrollOffsetY
       # Frame swap timestamp.
       optional Network.TimeSinceEpoch timestamp
+      # Identifies one negotiated screencast lifetime. Frames from a previous
+      # stream must not be presented after a card or target switch.
+      optional integer streamId
+      # Actual payload format selected by the backend.
+      optional enum format
+        h264
+        jpeg
+        png
+      # Video codec of the frame payload. Absent for image frames.
+      optional string codec
+      # WebCodecs-compatible decoder configuration string.
+      optional string codecString
+      # Whether this video payload is independently decodable.
+      optional boolean keyFrame
+      # Lynx frame-composition metadata. Present when the new ScreenCast
+      # pipeline sends a full frame or delta rectangle.
+      optional LynxScreencastFrameMetadata lynxFrame
 
   # Javascript dialog type.
   type DialogType extends string
@@ -7310,6 +7351,8 @@ domain Page
     parameters
       # Frame number.
       integer sessionId
+      # Stream being acknowledged. Omitted for legacy backends.
+      optional integer streamId
 
   # Searches for given string in resource content.
   experimental command searchInResource
@@ -7462,6 +7505,11 @@ domain Page
       optional enum format
         jpeg
         png
+      # Ordered transport preferences. Unsupported entries are skipped.
+      optional array of enum preferredFormats
+        h264
+        jpeg
+        png
       # Compression quality from range [0..100].
       optional integer quality
       # Maximum screenshot width.
@@ -7470,6 +7518,21 @@ domain Page
       optional integer maxHeight
       # Send every n-th frame.
       optional integer everyNthFrame
+      # Enables the Lynx 8 FPS target-size capture, pixel diffing, and delta
+      # JPEG pipeline. False selects the develop-compatible 1 FPS full-frame pipeline.
+      optional boolean enableBetterScreencast
+      # Skip static captures using window frame signals, with periodic fallback.
+      optional boolean enableFrameSignalGate
+      # Desired maximum frame rate. The backend may choose a lower rate.
+      optional integer targetFps
+      # Whether an explicit user action may retry a previously denied platform
+      # screen-capture permission request.
+      optional boolean retryCapturePermission
+      # Lynx screenshot scope (fullscreen or lynxview).
+      optional string mode
+    returns
+      # Identifies the negotiated stream and all of its frames/state events.
+      integer streamId
 
   # Force the page stop all navigations and pending resource fetches.
   command stopLoading
@@ -7866,6 +7929,23 @@ domain Page
     parameters
       # True if the page is visible.
       boolean visible
+
+  # Reports transport negotiation, fallback, and termination for a stream.
+  experimental event screencastStateChanged
+    parameters
+      integer streamId
+      enum state
+        negotiating
+        streaming
+        stopped
+        failed
+      optional enum format
+        h264
+        jpeg
+        png
+      optional string codecString
+      optional string fallbackReason
+      optional integer targetFps
 
   # Fired when a new window is going to be opened, via window.open(), link click, form submission,
   # etc.

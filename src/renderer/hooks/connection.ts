@@ -29,6 +29,31 @@ let lastWsPath = '';
 let lastRoomId = '';
 const delaySampleSize = 5;
 const KEY_SELECT_DEVICE = 'key_select_device';
+const inactiveSessionIds = new Map<number, Set<number>>();
+const visibleSessionHistory = new Map<number, number[]>();
+const pendingSessionFallbacks = new Map<
+  number,
+  { sessionId: number; timer: ReturnType<typeof setTimeout> }
+>();
+const SESSION_VISIBILITY_FALLBACK_DELAY = 150;
+
+function clearPendingSessionFallback(clientId: number) {
+  const pending = pendingSessionFallbacks.get(clientId);
+  if (pending) {
+    clearTimeout(pending.timer);
+    pendingSessionFallbacks.delete(clientId);
+  }
+}
+
+function rememberVisibleSession(clientId: number, sessionId: number) {
+  const history = visibleSessionHistory.get(clientId) ?? [];
+  const previousIndex = history.indexOf(sessionId);
+  if (previousIndex !== -1) {
+    history.splice(previousIndex, 1);
+  }
+  history.push(sessionId);
+  visibleSessionHistory.set(clientId, history);
+}
 
 // eslint-disable-next-line max-lines-per-function
 const connectionStore = (store: any) => ({
@@ -42,6 +67,7 @@ const connectionStore = (store: any) => ({
   // client automatically selects the card session to focus on
   appFocusSession: {} as any,
   cardFilter: queryService.getCardFilter(),
+  inactiveSessionRevision: 0,
   driverUnttached: false,
   useVpnIp: localStorage.getItem(LDT_CONST.KEY_USE_VPN_IP) === 'true',
 
@@ -130,6 +156,14 @@ const connectionStore = (store: any) => ({
 
     const currentClientId = selectedDevice.clientId ?? 0;
     const devices = clients.filter((item) => item.type && item.type.toLowerCase() === 'runtime') || [];
+    const activeClientIds = new Set(devices.map((device) => device.id));
+    for (const clientId of inactiveSessionIds.keys()) {
+      if (!activeClientIds.has(clientId)) {
+        inactiveSessionIds.delete(clientId);
+        visibleSessionHistory.delete(clientId);
+        clearPendingSessionFallback(clientId);
+      }
+    }
     // when lynx page switches, the previous page sometimes remains, affecting the device currently displayed, here check once session, let ldt select a device with session
     if (viewMode === 'lynx') {
       if (devices.length > 1) {
@@ -198,6 +232,15 @@ const connectionStore = (store: any) => ({
 
     // ISessionInfo's type definition is not unified, temporarily use as writing to bypass
     const sessions = data.sort((a, b) => b.session_id - a.session_id) as ISessionInfo[];
+    const knownInactiveSessions = inactiveSessionIds.get(sender);
+    if (knownInactiveSessions) {
+      const liveSessionIds = new Set(sessions.map((session) => session.session_id));
+      for (const sessionId of knownInactiveSessions) {
+        if (!liveSessionIds.has(sessionId)) {
+          knownInactiveSessions.delete(sessionId);
+        }
+      }
+    }
     sessions.forEach((s) => {
       try {
         s.url = decodeURIComponent(s.url);
@@ -207,6 +250,9 @@ const connectionStore = (store: any) => ({
       }
     });
     let deviceInfo = deviceInfoMap[sender];
+    const previousSessionIds = new Set(
+      deviceInfo?.sessions?.map((session) => session.session_id) ?? []
+    );
     if (deviceInfo) {
       // keep the screenshot field in the sessions of the old deviceMap
       deviceInfo.sessions?.forEach((oldSession: ISessionInfo) => {
@@ -261,6 +307,11 @@ const connectionStore = (store: any) => ({
     // decide the new focused card
     let newSelectedSessionId = -1;
     if (sessions.length > 0) {
+      const liveSessionIds = new Set(sessions.map((session) => session.session_id));
+      const history = visibleSessionHistory.get(sender);
+      if (history) {
+        visibleSessionHistory.set(sender, history.filter((sessionId) => liveSessionIds.has(sessionId)));
+      }
       if (appFocusSession.clientId === sender) {
         const session = sessions.find((item) => item.session_id === appFocusSession.sessionId);
         if (session) {
@@ -272,14 +323,33 @@ const connectionStore = (store: any) => ({
         const autoFocusOnLastSession = localStorage.getItem(LDT_CONST.KEY_AUTO_FOCUS_LAST_SESSION) !== 'false';
         // if there is a filter condition, when automatically selecting cards, the cards after filtering should be automatically focused
         const filterSessions = cardFilter ? sessions.filter((s) => s.url.includes(cardFilter)) : sessions;
-        const filterSession = filterSessions.find((item) => item.session_id === deviceInfo.selectedSession?.session_id);
-        // if no card is selected, or automatic card selection and not in card debug mode, or the originally selected card is not available, select the first card
-        if ((autoFocusOnLastSession && !deviceInfo.isCardDebugMode) || !deviceInfo.selectedSession || !filterSession) {
-          newSelectedSessionId = filterSessions[0]?.session_id;
+        const selectableSessions = filterSessions.filter(
+          (session) => !knownInactiveSessions?.has(session.session_id)
+        );
+        const filterSession = filterSessions.find(
+          (item) => item.session_id === deviceInfo.selectedSession?.session_id
+        );
+        const latestNewSession = filterSessions.find(
+          (session) => !previousSessionIds.has(session.session_id)
+        );
+        // A newly-created card represents forward navigation and is authoritative.
+        // Otherwise keep the current card until its visibility event determines
+        // whether this is a back navigation; ordering by session id cannot do that.
+        if (autoFocusOnLastSession && !deviceInfo.isCardDebugMode && latestNewSession) {
+          clearPendingSessionFallback(sender);
+          newSelectedSessionId = latestNewSession.session_id;
+        } else if (!deviceInfo.selectedSession || !filterSession) {
+          const selectableSessionId = selectableSessions[0]?.session_id;
+          if (selectableSessionId !== undefined) {
+            newSelectedSessionId = selectableSessionId;
+          }
           // TOOD: when the card in debug mode is destroyed, exit debug mode
         }
       }
     } else {
+      inactiveSessionIds.delete(sender);
+      visibleSessionHistory.delete(sender);
+      clearPendingSessionFallback(sender);
       newSelectedSessionId = 0;
       deviceInfo.selectedSession = undefined;
       // TODO: if (deviceInfo.isCardDebugMode) {
@@ -290,6 +360,94 @@ const connectionStore = (store: any) => ({
     if (sender === selectedDevice.clientId && newSelectedSessionId !== -1) {
       setSelectedSession(newSelectedSessionId);
     }
+  },
+
+  updateSessionVisibility(clientId: number, sessionId: number, visible: boolean) {
+    const {
+      selectedDevice,
+      deviceInfoMap,
+      cardFilter,
+      inactiveSessionRevision
+    } = store() as ConnectionStoreType;
+    if (!clientId || !sessionId || selectedDevice.clientId !== clientId) {
+      return;
+    }
+    let inactive = inactiveSessionIds.get(clientId);
+    if (!inactive) {
+      inactive = new Set<number>();
+      inactiveSessionIds.set(clientId, inactive);
+    }
+    if (visible) {
+      clearPendingSessionFallback(clientId);
+      if (inactive.delete(sessionId)) {
+        store({ inactiveSessionRevision: inactiveSessionRevision + 1 });
+      }
+      rememberVisibleSession(clientId, sessionId);
+      return;
+    }
+    if (!inactive.has(sessionId)) {
+      inactive.add(sessionId);
+      store({ inactiveSessionRevision: inactiveSessionRevision + 1 });
+    }
+
+    const deviceInfo = deviceInfoMap[clientId];
+    if (deviceInfo?.selectedSession?.session_id !== sessionId) {
+      return;
+    }
+    const autoFocusOnLastSession =
+      localStorage.getItem(LDT_CONST.KEY_AUTO_FOCUS_LAST_SESSION) !== 'false';
+    if (!autoFocusOnLastSession || deviceInfo.isCardDebugMode) {
+      return;
+    }
+    clearPendingSessionFallback(clientId);
+    const timer = setTimeout(() => {
+      pendingSessionFallbacks.delete(clientId);
+      const {
+        selectedDevice: currentDevice,
+        deviceInfoMap: currentDeviceInfoMap,
+        cardFilter: currentCardFilter,
+        setSelectedSession: selectSession
+      } = store() as ConnectionStoreType;
+      const currentDeviceInfo = currentDeviceInfoMap[clientId];
+      if (
+        currentDevice.clientId !== clientId ||
+        currentDeviceInfo?.selectedSession?.session_id !== sessionId ||
+        !inactiveSessionIds.get(clientId)?.has(sessionId)
+      ) {
+        return;
+      }
+
+      const sessions = (currentDeviceInfo.sessions ?? []).filter(
+        (session) => !currentCardFilter || session.url.includes(currentCardFilter)
+      );
+      const history = visibleSessionHistory.get(clientId) ?? [];
+      let nextSessionId: number | undefined;
+      if (history[history.length - 1] === sessionId) {
+        history.pop();
+        nextSessionId = history[history.length - 1];
+      } else {
+        const staleIndex = history.indexOf(sessionId);
+        if (staleIndex !== -1) {
+          history.splice(staleIndex, 1);
+        }
+      }
+      visibleSessionHistory.set(clientId, history);
+
+      if (nextSessionId === undefined || !sessions.some((session) => session.session_id === nextSessionId)) {
+        // On a cold DevTool connection there is no visibility history yet.
+        // Probe older sessions in stack order until the native side confirms
+        // which LynxView is actually visible.
+        nextSessionId = sessions.find((session) => session.session_id < sessionId)?.session_id;
+      }
+      if (nextSessionId !== undefined) {
+        selectSession(nextSessionId);
+      }
+    }, SESSION_VISIBILITY_FALLBACK_DELAY);
+    pendingSessionFallbacks.set(clientId, { sessionId, timer });
+  },
+
+  isSessionInactive(clientId: number, sessionId: number): boolean {
+    return inactiveSessionIds.get(clientId)?.has(sessionId) ?? false;
   },
 
   // report connection result
